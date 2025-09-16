@@ -1,0 +1,4 @@
+PySide6
+PyMuPDF
+soundfile
+kokoro>=0.9.4

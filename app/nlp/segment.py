@@ -1,0 +1,1 @@
+# Placeholder for advanced segmentation (e.g., pysbd). In this skeleton we split in pdf_reader.py
