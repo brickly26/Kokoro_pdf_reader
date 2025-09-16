@@ -15,14 +15,21 @@ class KokoroTTS:
         self.pipeline = self._KPipeline(lang_code=lang_code)
         self.voice, self.speed, self.sr = voice, speed, sr
 
-    def synth_sentences(self, sentences, out_dir: Path):
+    def synth_sentences(self, sentences, out_dir: Path, on_progress=None):
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        text = "\\n".join(s.strip() for s in sentences if s.strip())
-        gen = self.pipeline(text, voice=self.voice, speed=self.speed, split_pattern=r"\\n+")
+        filtered = [s.strip() for s in sentences if s and s.strip()]
+        total = len(filtered)
+        text = "\n".join(filtered)
+        gen = self.pipeline(text, voice=self.voice, speed=self.speed, split_pattern=r"\n+")
         paths = []
         for idx, (gs, _ps, audio) in enumerate(gen):
             path = out_dir / f"{idx:05d}.wav"
             sf.write(path.as_posix(), audio, self.sr)
             paths.append((idx, gs, path.as_posix(), len(audio)/self.sr))
+            if on_progress:
+                try:
+                    on_progress(idx + 1, total)
+                except Exception:
+                    pass
         return paths
