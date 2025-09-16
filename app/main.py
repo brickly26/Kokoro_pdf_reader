@@ -1,10 +1,10 @@
 from PySide6.QtWidgets import QApplication
-from app.ui.main_window import ReaderMainWindow
+from app.ui.home_window import HomeWindow
 import sys
 
 def main():
     app = QApplication(sys.argv)
-    win = ReaderMainWindow()
+    win = HomeWindow()
     win.resize(1280, 900)
     win.show()
     sys.exit(app.exec())

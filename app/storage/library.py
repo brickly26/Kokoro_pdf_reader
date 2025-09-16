@@ -1,5 +1,5 @@
 from pathlib import Path
-import sqlite3, hashlib, shutil, os
+import sqlite3, hashlib, shutil, os, json
 from dataclasses import dataclass
 
 ROOT = Path(__file__).resolve().parents[2] / "Library"
@@ -61,7 +61,7 @@ class Library:
         p.mkdir(parents=True, exist_ok=True)
         return p.as_posix()
 
-    def save_chunks(self, document_id: str, sentences, chunks):
+    def save_chunks(self, document_id: str, sentences, chunks, voice: str = "", speed: float = 1.0):
         # sentences: list[Sentence]; chunks: list[(idx, text, path, dur)]
         cur = self.conn.cursor()
         cur.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
@@ -72,6 +72,37 @@ class Library:
                 _idx, _txt, apath, dur = chunks[i]
             cur.execute(
                 "INSERT INTO chunks(document_id, order_idx, page_index, text, bbox_json, audio_path, duration_sec, voice, speed) VALUES(?,?,?,?,?,?,?,?,?)",
-                (document_id, i, s.page_index, s.text, "", apath, dur, "", 1.0)
+                (document_id, i, s.page_index, s.text, json.dumps(getattr(s, "word_boxes", [])), apath, dur, voice, speed)
             )
         self.conn.commit()
+
+    def list_documents(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, title, file_path, page_count, added_at FROM documents ORDER BY added_at DESC")
+        return cur.fetchall()
+
+    def get_document(self, document_id: str):
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, title, file_path, page_count, added_at FROM documents WHERE id=?", (document_id,))
+        return cur.fetchone()
+
+    def get_chunks(self, document_id: str):
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT order_idx, page_index, text, bbox_json, audio_path, duration_sec, voice, speed FROM chunks WHERE document_id=? ORDER BY order_idx ASC",
+            (document_id,)
+        )
+        return cur.fetchall()
+
+    def delete_document(self, document_id: str):
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
+        cur.execute("DELETE FROM documents WHERE id=?", (document_id,))
+        self.conn.commit()
+        # remove on-disk folder
+        doc_dir = ROOT / document_id
+        try:
+            if doc_dir.exists():
+                shutil.rmtree(doc_dir)
+        except Exception:
+            pass
