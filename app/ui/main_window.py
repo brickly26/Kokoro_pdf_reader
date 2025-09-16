@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget,
-    QListWidgetItem, QFileDialog, QLabel, QMessageBox, QSplitter, QSlider, QComboBox
+    QListWidgetItem, QFileDialog, QLabel, QMessageBox, QSplitter, QSlider, QComboBox, QProgressDialog, QApplication
 )
 from PySide6.QtCore import Qt, QUrl, QThread, Signal, QObject
 from PySide6.QtGui import QAction
@@ -26,7 +26,11 @@ class TTSWorker(QObject):
     def run(self):
         try:
             tts = KokoroTTS(voice=self.voice, speed=self.speed)
-            chunks = tts.synth_sentences([s.text for s in self.sentences], Path(self.out_dir))
+            done = 0
+            total = max(1, len(self.sentences))
+            def on_progress(idx_done, total_count):
+                self.progressed.emit(idx_done, total_count)
+            chunks = tts.synth_sentences([s.text for s in self.sentences], Path(self.out_dir), on_progress=on_progress)
             # chunks: list of (idx, text, path, dur)
             self.finished.emit(chunks, "")
         except KokoroNotAvailable as e:
@@ -45,13 +49,13 @@ class ReaderMainWindow(QMainWindow):
         self.current_sentences: list[Sentence] = []
         self.current_chunks = []  # list of tuples returned by Kokoro
         self.filters = DEFAULT_FILTERS.copy()
+        self._progress_dialog = None
 
         # --- UI ---
         self.canvas = PdfCanvas()
         self.sent_list = QListWidget()
         self.play_btn = QPushButton("▶ Play selected")
         self.back_btn = QPushButton("← Back to Home")
-        self.open_btn = QPushButton("Open PDF")
         self.gen_btn = QPushButton("Generate Audio")
         self.filter_btn = QPushButton("Filters…")
         self.voice_combo = QComboBox(); self.voice_combo.addItems(["af_heart", "af_alloy", "af_sky", "af_river"])
@@ -60,7 +64,6 @@ class ReaderMainWindow(QMainWindow):
 
         left = QWidget(); lyt = QVBoxLayout(left)
         lyt.addWidget(self.back_btn)
-        lyt.addWidget(self.open_btn)
         lyt.addWidget(self.filter_btn)
         row = QHBoxLayout()
         row.addWidget(QLabel("Voice:")); row.addWidget(self.voice_combo)
@@ -87,13 +90,8 @@ class ReaderMainWindow(QMainWindow):
         self.player = AudioPlayer()
         self.player.playbackFinished.connect(self._on_chunk_finished)
 
-        # menu
-        open_act = QAction("Open PDF", self); open_act.triggered.connect(self.open_pdf)
-        self.menuBar().addAction(open_act)
-
         # wire
         self.back_btn.clicked.connect(self.go_back)
-        self.open_btn.clicked.connect(self.open_pdf)
         self.filter_btn.clicked.connect(self.open_filters)
         self.gen_btn.clicked.connect(self.generate_audio)
         self.play_btn.clicked.connect(self.play_selected)
@@ -102,11 +100,14 @@ class ReaderMainWindow(QMainWindow):
     # --- reusable loaders ---
     def load_pdf_path(self, path: str):
         self.current_pdf_path = path
+        self._show_progress("Extracting sentences…", indeterminate=True)
+        QApplication.processEvents()
         self.canvas.load_pdf(path)
         self.status.setText("Extracting sentences…")
         self.current_sentences = extract_sentences(path, self.filters)
         self._populate_sentence_list()
         self.status.setText(f"Loaded {len(self.current_sentences)} sentences.")
+        self._close_progress()
 
     def load_project(self, document_id: str):
         doc = self.library.get_document(document_id)
@@ -117,7 +118,6 @@ class ReaderMainWindow(QMainWindow):
         self.current_pdf_path = file_path
         self.canvas.load_pdf(file_path)
         self.status.setText("Loading project…")
-        # Load sentences and attach audio paths
         rows = self.library.get_chunks(document_id)
         self.current_sentences = []
         self.current_chunks = []
@@ -128,21 +128,14 @@ class ReaderMainWindow(QMainWindow):
             except Exception:
                 boxes = []
             self.current_sentences.append(Sentence(page_index=page_index, text=text, word_boxes=boxes))
-            # keep chunks list aligned to sentences
             self.current_chunks.append((order_idx, text, audio_path or "", duration_sec or 0.0))
         self._populate_sentence_list()
-        # attach audio paths to list items
         for i in range(min(len(self.current_chunks), self.sent_list.count())):
             it = self.sent_list.item(i)
             it.setData(Qt.UserRole + 1, self.current_chunks[i][2])
         self.status.setText(f"Loaded project with {len(self.current_sentences)} sentences.")
 
     # --- actions ---
-    def open_pdf(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", filter="PDF Files (*.pdf)")
-        if not path: return
-        self.load_pdf_path(path)
-
     def open_filters(self):
         dlg = FiltersDialog(self.filters, self)
         if dlg.exec():
@@ -159,29 +152,35 @@ class ReaderMainWindow(QMainWindow):
         doc_id = self.library.ensure_document(self.current_pdf_path)
         out_dir = self.library.audio_dir(doc_id)
         self.status.setText("Generating audio with Kokoro…")
+        self._show_progress("Generating audio…", indeterminate=False, maximum=max(1, len(self.current_sentences)))
         # Thread
         self.thread = QThread()
         self.worker = TTSWorker(self.current_sentences, out_dir, voice, speed)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
+        self.worker.progressed.connect(self._on_tts_progress)
         self.worker.finished.connect(self._tts_done)
         self.worker.finished.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
 
+    def _on_tts_progress(self, done: int, total: int):
+        if self._progress_dialog:
+            self._progress_dialog.setMaximum(max(1, total))
+            self._progress_dialog.setValue(done)
+
     def _tts_done(self, chunks, err):
+        self._close_progress()
         if err:
             QMessageBox.warning(self, "TTS error", err)
             self.status.setText("TTS failed.")
             return
         self.current_chunks = chunks
-        # map chunk->list item
         for i in range(min(len(self.current_chunks), self.sent_list.count())):
             it = self.sent_list.item(i)
-            it.setData(Qt.UserRole + 1, self.current_chunks[i][2])  # audio_path
+            it.setData(Qt.UserRole + 1, self.current_chunks[i][2])
         self.status.setText(f"Generated {len(self.current_chunks)} chunks. Click a sentence to play.")
-        # Save mapping in library db
         doc_id = self.library.ensure_document(self.current_pdf_path)
         voice = self.voice_combo.currentText()
         speed = self.speed_slider.value() / 100.0
@@ -195,13 +194,11 @@ class ReaderMainWindow(QMainWindow):
         if not audio:
             QMessageBox.information(self, "No audio", "Generate audio first.")
             return
-        # Set highlight and scroll
         sent = self.current_sentences[idx]
         self.canvas.show_sentence(sent)
         self.player.play_file(audio)
 
     def _on_chunk_finished(self):
-        # advance to next sentence if desired (optional for MVP)
         pass
 
     def _populate_sentence_list(self):
@@ -214,3 +211,19 @@ class ReaderMainWindow(QMainWindow):
     def go_back(self):
         self.backRequested.emit()
         self.close()
+
+    def _show_progress(self, text: str, indeterminate: bool = True, maximum: int = 0):
+        self._close_progress()
+        dlg = QProgressDialog(text, None, 0, maximum if not indeterminate else 0, self)
+        dlg.setCancelButton(None)
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.show()
+        self._progress_dialog = dlg
+
+    def _close_progress(self):
+        if self._progress_dialog:
+            self._progress_dialog.close()
+            self._progress_dialog = None
