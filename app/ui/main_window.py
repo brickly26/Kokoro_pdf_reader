@@ -11,7 +11,7 @@ from app.tts.kokoro_engine import KokoroTTS, KokoroNotAvailable
 from app.utils.audio_player import AudioPlayer
 from app.storage.library import Library
 from pathlib import Path
-import os
+import os, json
 
 class TTSWorker(QObject):
     progressed = Signal(int, int)  # done, total
@@ -35,6 +35,8 @@ class TTSWorker(QObject):
             self.finished.emit([], f"Unexpected error: {e!r}")
 
 class ReaderMainWindow(QMainWindow):
+    backRequested = Signal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Kokoro Read‑Along")
@@ -48,6 +50,7 @@ class ReaderMainWindow(QMainWindow):
         self.canvas = PdfCanvas()
         self.sent_list = QListWidget()
         self.play_btn = QPushButton("▶ Play selected")
+        self.back_btn = QPushButton("← Back to Home")
         self.open_btn = QPushButton("Open PDF")
         self.gen_btn = QPushButton("Generate Audio")
         self.filter_btn = QPushButton("Filters…")
@@ -56,6 +59,7 @@ class ReaderMainWindow(QMainWindow):
         self.status = QLabel("Ready")
 
         left = QWidget(); lyt = QVBoxLayout(left)
+        lyt.addWidget(self.back_btn)
         lyt.addWidget(self.open_btn)
         lyt.addWidget(self.filter_btn)
         row = QHBoxLayout()
@@ -88,33 +92,63 @@ class ReaderMainWindow(QMainWindow):
         self.menuBar().addAction(open_act)
 
         # wire
+        self.back_btn.clicked.connect(self.go_back)
         self.open_btn.clicked.connect(self.open_pdf)
         self.filter_btn.clicked.connect(self.open_filters)
         self.gen_btn.clicked.connect(self.generate_audio)
         self.play_btn.clicked.connect(self.play_selected)
         self.sent_list.itemClicked.connect(self.play_selected)
 
-    # --- actions ---
-    def open_pdf(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", filter="PDF Files (*.pdf)")
-        if not path: return
+    # --- reusable loaders ---
+    def load_pdf_path(self, path: str):
         self.current_pdf_path = path
         self.canvas.load_pdf(path)
         self.status.setText("Extracting sentences…")
         self.current_sentences = extract_sentences(path, self.filters)
-        self.sent_list.clear()
-        for i, s in enumerate(self.current_sentences):
-            it = QListWidgetItem(f"{i+1:04d}  {s.text}")
-            it.setData(Qt.UserRole, i)
-            self.sent_list.addItem(it)
+        self._populate_sentence_list()
         self.status.setText(f"Loaded {len(self.current_sentences)} sentences.")
+
+    def load_project(self, document_id: str):
+        doc = self.library.get_document(document_id)
+        if not doc:
+            QMessageBox.warning(self, "Missing project", "Project not found on disk.")
+            return
+        _id, _title, file_path, _pc, _added = doc
+        self.current_pdf_path = file_path
+        self.canvas.load_pdf(file_path)
+        self.status.setText("Loading project…")
+        # Load sentences and attach audio paths
+        rows = self.library.get_chunks(document_id)
+        self.current_sentences = []
+        self.current_chunks = []
+        self.sent_list.clear()
+        for order_idx, page_index, text, bbox_json, audio_path, duration_sec, voice, speed in rows:
+            try:
+                boxes = json.loads(bbox_json) if bbox_json else []
+            except Exception:
+                boxes = []
+            self.current_sentences.append(Sentence(page_index=page_index, text=text, word_boxes=boxes))
+            # keep chunks list aligned to sentences
+            self.current_chunks.append((order_idx, text, audio_path or "", duration_sec or 0.0))
+        self._populate_sentence_list()
+        # attach audio paths to list items
+        for i in range(min(len(self.current_chunks), self.sent_list.count())):
+            it = self.sent_list.item(i)
+            it.setData(Qt.UserRole + 1, self.current_chunks[i][2])
+        self.status.setText(f"Loaded project with {len(self.current_sentences)} sentences.")
+
+    # --- actions ---
+    def open_pdf(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", filter="PDF Files (*.pdf)")
+        if not path: return
+        self.load_pdf_path(path)
 
     def open_filters(self):
         dlg = FiltersDialog(self.filters, self)
         if dlg.exec():
             self.filters = dlg.values()
             if self.current_pdf_path:
-                self.open_pdf()  # re-extract
+                self.load_pdf_path(self.current_pdf_path)
 
     def generate_audio(self):
         if not self.current_sentences:
@@ -149,7 +183,9 @@ class ReaderMainWindow(QMainWindow):
         self.status.setText(f"Generated {len(self.current_chunks)} chunks. Click a sentence to play.")
         # Save mapping in library db
         doc_id = self.library.ensure_document(self.current_pdf_path)
-        self.library.save_chunks(doc_id, self.current_sentences, self.current_chunks)
+        voice = self.voice_combo.currentText()
+        speed = self.speed_slider.value() / 100.0
+        self.library.save_chunks(doc_id, self.current_sentences, self.current_chunks, voice=voice, speed=speed)
 
     def play_selected(self):
         it = self.sent_list.currentItem()
@@ -167,3 +203,14 @@ class ReaderMainWindow(QMainWindow):
     def _on_chunk_finished(self):
         # advance to next sentence if desired (optional for MVP)
         pass
+
+    def _populate_sentence_list(self):
+        self.sent_list.clear()
+        for i, s in enumerate(self.current_sentences):
+            it = QListWidgetItem(f"{i+1:04d}  {s.text}")
+            it.setData(Qt.UserRole, i)
+            self.sent_list.addItem(it)
+
+    def go_back(self):
+        self.backRequested.emit()
+        self.close()
