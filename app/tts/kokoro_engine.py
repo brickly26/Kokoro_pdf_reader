@@ -1,5 +1,6 @@
 from pathlib import Path
 import soundfile as sf
+import numpy as np
 
 class KokoroNotAvailable(Exception):
     pass
@@ -33,3 +34,42 @@ class KokoroTTS:
                 except Exception:
                     pass
         return paths
+
+    def synth_chunks(self, texts, out_dir: Path, on_progress=None):
+        """texts: list[str]; returns (records, merged_path, sr)
+        records[i] = (path, duration_sec)
+        """
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        total = len(texts)
+        text = "\n".join(t.strip() for t in texts)
+        gen = self.pipeline(text, voice=self.voice, speed=self.speed, split_pattern=r"\n+")
+        paths = []
+        audios = []
+        for idx, (gs, _ps, audio) in enumerate(gen):
+            path = out_dir / f"{idx:05d}.wav"
+            sf.write(path.as_posix(), audio, self.sr)
+            paths.append((idx, gs, path.as_posix(), len(audio)/self.sr))
+            audios.append(np.asarray(audio, dtype=np.float32))
+            if on_progress:
+                try:
+                    on_progress(idx + 1, total)
+                except Exception:
+                    pass
+        # merge
+        if audios:
+            merged = np.concatenate(audios)
+        else:
+            merged = np.zeros((0,), dtype=np.float32)
+        merged_path = out_dir / "merged.wav"
+        sf.write(merged_path.as_posix(), merged, self.sr)
+        # compute offsets
+        offsets = []
+        cursor = 0
+        for idx, a in enumerate(audios):
+            start_ms = int(cursor * 1000 / self.sr)
+            dur_ms = int(len(a) * 1000 / self.sr)
+            end_ms = start_ms + dur_ms
+            cursor += len(a)
+            offsets.append((start_ms, end_ms))
+        return paths, merged_path.as_posix(), self.sr, offsets

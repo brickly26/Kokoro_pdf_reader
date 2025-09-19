@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -5,6 +6,12 @@ __pycache__/
 *.egg-info/
 .venv/
 .env/
+
+# Node.js
+desktop/node_modules/
+desktop/npm-debug.log*
+desktop/yarn-debug.log*
+desktop/yarn-error.log*
 
 # macOS
 .DS_Store
@@ -14,7 +21,11 @@ Library/           # stores PDFs & generated audio
 *.wav
 *.ogg
 *.mp3
+*.pdf
+*.sqlite3
+
+# Build outputs
 /dist/
 build/
 *.spec             # PyInstaller spec
-EOF
+

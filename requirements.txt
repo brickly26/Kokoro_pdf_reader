@@ -1,4 +1,29 @@
-PySide6
+# Core dependencies
 PyMuPDF
 soundfile
 kokoro>=0.9.4
+fastapi
+uvicorn
+numpy
+
+# Enhanced PDF processing pipeline dependencies
+layoutparser>=0.3.4        # Layout detection with PubLayNet
+detectron2                  # Backend for layoutparser (GPU optional)
+torchvision>=0.13.0        # Required for detectron2
+camelot-py[cv]>=0.10.1     # Table extraction
+tabula-py>=2.5.1           # Alternative table extraction
+pytesseract>=0.3.10        # OCR fallback
+opencv-python>=4.5.0       # Image processing
+scikit-image>=0.19.0       # Image analysis
+pillow>=9.0.0              # Image handling
+pandas>=1.5.0              # Data processing for tables
+openpyxl>=3.0.0            # Excel output for tables
+matplotlib>=3.5.0          # Visualization and image saving
+scipy>=1.9.0               # Mathematical operations
+sympy>=1.11.0              # Mathematical symbol processing
+pdfplumber>=0.7.0          # Alternative PDF parsing
+reportlab>=3.6.0           # PDF generation if needed
+
+# Optional dependencies (install separately if needed)
+# easyocr>=1.6.0           # Alternative OCR engine
+# mathpix-python>=1.0.0    # Mathematical OCR (requires API key)
