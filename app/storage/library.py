@@ -31,8 +31,32 @@ CREATE TABLE IF NOT EXISTS chunks(
 
 class Library:
     def __init__(self):
-        self.conn = sqlite3.connect(DB)
+        # Allow usage from FastAPI threadpool workers
+        self.conn = sqlite3.connect(DB, check_same_thread=False)
         self.conn.executescript(SCHEMA)
+        self._migrate_schema()
+
+    def _migrate_schema(self):
+        cur = self.conn.cursor()
+        # Add columns to chunks if missing
+        cur.execute("PRAGMA table_info(chunks)")
+        cols = {r[1] for r in cur.fetchall()}  # name at index 1
+        if "section" not in cols:
+            cur.execute("ALTER TABLE chunks ADD COLUMN section TEXT")
+        if "merged_start_ms" not in cols:
+            cur.execute("ALTER TABLE chunks ADD COLUMN merged_start_ms INTEGER")
+        if "merged_end_ms" not in cols:
+            cur.execute("ALTER TABLE chunks ADD COLUMN merged_end_ms INTEGER")
+        if "sample_rate" not in cols:
+            cur.execute("ALTER TABLE chunks ADD COLUMN sample_rate INTEGER")
+        # Add merged audio path to documents
+        cur.execute("PRAGMA table_info(documents)")
+        dcols = {r[1] for r in cur.fetchall()}
+        if "merged_audio_path" not in dcols:
+            cur.execute("ALTER TABLE documents ADD COLUMN merged_audio_path TEXT")
+        if "merged_sr" not in dcols:
+            cur.execute("ALTER TABLE documents ADD COLUMN merged_sr INTEGER")
+        self.conn.commit()
 
     def _doc_id(self, pdf_path: str) -> str:
         h = hashlib.sha256(Path(pdf_path).read_bytes()).hexdigest()[:16]
@@ -61,6 +85,7 @@ class Library:
         p.mkdir(parents=True, exist_ok=True)
         return p.as_posix()
 
+    # Backward-compatible API
     def save_chunks(self, document_id: str, sentences, chunks, voice: str = "", speed: float = 1.0):
         # sentences: list[Sentence]; chunks: list[(idx, text, path, dur)]
         cur = self.conn.cursor()
@@ -83,7 +108,7 @@ class Library:
 
     def get_document(self, document_id: str):
         cur = self.conn.cursor()
-        cur.execute("SELECT id, title, file_path, page_count, added_at FROM documents WHERE id=?", (document_id,))
+        cur.execute("SELECT id, title, file_path, page_count, added_at, merged_audio_path, merged_sr FROM documents WHERE id=?", (document_id,))
         return cur.fetchone()
 
     def get_chunks(self, document_id: str):
@@ -93,6 +118,66 @@ class Library:
             (document_id,)
         )
         return cur.fetchall()
+
+    # New APIs for chunk metadata and merged audio
+    def save_chunk_records(self, document_id: str, records, voice: str, speed: float, merged_audio_path: str, sample_rate: int):
+        """records: iterable of dict with keys: order_idx, page_index, section, text, boxes, audio_path, duration_sec, start_ms, end_ms"""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
+        for r in records:
+            cur.execute(
+                "INSERT INTO chunks(document_id, order_idx, page_index, text, bbox_json, audio_path, duration_sec, voice, speed, section, merged_start_ms, merged_end_ms, sample_rate) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    document_id,
+                    int(r.get("order_idx", 0)),
+                    int(r.get("page_index", 0)),
+                    r.get("text", ""),
+                    json.dumps(r.get("boxes", [])),
+                    r.get("audio_path", ""),
+                    float(r.get("duration_sec", 0.0)),
+                    voice,
+                    speed,
+                    r.get("section", "body"),
+                    int(r.get("start_ms", 0)),
+                    int(r.get("end_ms", 0)),
+                    int(sample_rate),
+                )
+            )
+        # Update documents merged audio info
+        self.conn.execute(
+            "UPDATE documents SET merged_audio_path=?, merged_sr=? WHERE id=?",
+            (merged_audio_path, int(sample_rate), document_id)
+        )
+        self.conn.commit()
+
+    def get_chunk_records(self, document_id: str):
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT order_idx, page_index, text, bbox_json, audio_path, duration_sec, voice, speed, section, merged_start_ms, merged_end_ms, sample_rate FROM chunks WHERE document_id=? ORDER BY order_idx ASC",
+            (document_id,)
+        )
+        rows = cur.fetchall()
+        out = []
+        for (order_idx, page_index, text, bbox_json, audio_path, duration_sec, voice, speed, section, start_ms, end_ms, sr) in rows:
+            try:
+                boxes = json.loads(bbox_json) if bbox_json else []
+            except Exception:
+                boxes = []
+            out.append({
+                "order_idx": order_idx,
+                "page_index": page_index,
+                "text": text,
+                "boxes": boxes,
+                "audio_path": audio_path,
+                "duration_sec": duration_sec,
+                "voice": voice,
+                "speed": speed,
+                "section": section or "body",
+                "start_ms": start_ms or 0,
+                "end_ms": end_ms or 0,
+                "sample_rate": sr or 24000,
+            })
+        return out
 
     def delete_document(self, document_id: str):
         cur = self.conn.cursor()
